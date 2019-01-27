@@ -21,8 +21,6 @@ It suspends cmd when it detects that the laptop is running on battery power,
 and resumes it when it detects that the laptop is using wall power.
 If you want to override nobatt, send SIGUSR1 to force cmd to resume,
 or SIGUSR2 to force cmd to suspend.
-
-Note that nobatt only controls cmd, not any other processes that cmd starts.
 `
 
 func main() {
@@ -39,6 +37,7 @@ func main() {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if err := cmd.Start(); err != nil {
 		log.Fatal(err)
@@ -53,7 +52,7 @@ func main() {
 	}()
 
 	sigc := make(chan os.Signal)
-	signal.Notify(sigc, syscall.SIGUSR1, syscall.SIGUSR2)
+	signal.Notify(sigc, syscall.SIGUSR1, syscall.SIGUSR2, syscall.SIGTERM, syscall.SIGINT)
 
 	running := true
 	run := func(want bool) {
@@ -62,13 +61,13 @@ func main() {
 			// already in correct state
 			return
 		}
-		var sig os.Signal
+		var sig syscall.Signal
 		if want {
 			sig = syscall.SIGCONT
 		} else {
 			sig = syscall.SIGSTOP
 		}
-		err := cmd.Process.Signal(sig)
+		err := syscall.Kill(-cmd.Process.Pid, sig)
 		// log.Printf("sent signal %v to cmd, err=%v", sig, err)
 		if err != nil {
 			log.Fatal(err)
@@ -82,7 +81,16 @@ loop:
 		case src := <-c:
 			run(src == power.AC)
 		case sig := <-sigc:
-			run(sig == syscall.SIGUSR1)
+			switch sig {
+			case syscall.SIGUSR1, syscall.SIGUSR2:
+				// manual start/stop
+				run(sig == syscall.SIGUSR1)
+			default:
+				// termination signals: send to child processes as well
+				// must be done manually, since we put them in their own process group
+				syscall.Kill(-cmd.Process.Pid, sig.(syscall.Signal))
+				break loop
+			}
 		case <-done:
 			break loop
 		}
